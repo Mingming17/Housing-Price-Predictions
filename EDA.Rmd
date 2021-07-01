@@ -1,0 +1,927 @@
+---
+title: "Housing Price Predictions - Data Cleaning and EDA"
+output: html_document
+---
+```{r,message=FALSE}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(readr)
+library(plyr)
+library(knitr)
+#library(corrplot)
+library(caret)
+library(gridExtra)
+library(scales)
+#library(Rmisc)
+library(ggrepel)
+library(randomForest)
+library(psych)
+library(xgboost)
+##load library
+#install.packages("corrplot")
+library(corrplot)
+#install.packages("Hmisc")
+library("Hmisc")
+#install.packages("devtools")
+library(devtools)
+#install_github("kassambara/easyGgplot2")
+#library(easyGgplot2)
+#install.packages("ggalluvial")
+library(ggalluvial)
+
+```
+
+# Data Cleaning
+
+```{r}
+# load data
+train <- read.csv('train.csv',stringsAsFactors = F)
+test <- read.csv('test.csv',stringsAsFactors = F) 
+
+test_labels <- test$Id
+test$Id <- NULL
+train$Id  <- NULL
+
+# Look at the data
+glimpse(train)
+glimpse(test) # Test data doesn't have SalePrice variable. 
+
+test$SalePrice <- NA
+# combine train and test data together to clean data.
+all <- rbind(train,test)
+dim(all)
+
+# look at the distribution of SalePrice
+ggplot(data=all[!is.na(all$SalePrice),], aes(x=SalePrice)) +
+  geom_histogram(binwidth = 10000) + 
+  scale_x_continuous(breaks= seq(0, 800000, by=100000),labels = scales::comma)
+
+####### 2. Deal with missing data ####### 
+
+# Look at the missing data
+
+NAcol <- which(colSums(is.na(all)) > 0) 
+NAcol # Some variables have missing values.
+all[NAcol] ## show all rows which have NA. 
+
+# sort(colSums(sapply(all[NAcol], is.na)), decreasing = TRUE)
+sort(colSums(is.na(all[NAcol])),decreasing = TRUE)
+length(sort(colSums(is.na(all[NAcol])),
+            decreasing = TRUE)) # There are 35 variables with missing value.
+
+missing_vars <- names(sort(colSums(is.na(all[NAcol])),decreasing = TRUE))
+missing_vars
+
+## Then, we will deal with the variable with NA one by one. 
+
+## 2.1 pool variables: PoolQC 
+# Na is because of the lack of pool in these house.
+all$PoolQC[!is.na(all$PoolQC)]  # Look at the rows which are not NA. 
+all$PoolQC[is.na(all$PoolQC)] <- 'None' # Transform those without a pool to 'None'
+# Use 0,1,2,3,4,5 to revalue the original value of pool quality.
+Qualities <- c('None' = 0, 'Po' = 1, 'Fa' = 2, 'TA' = 3, 'Gd' = 4, 'Ex' = 5)
+all$PoolQC<-as.integer(revalue(all$PoolQC,Qualities))
+table(all$PoolQC)
+
+all$PoolQC[2421] <- 2 
+all$PoolQC[2504] <- 3 
+all$PoolQC[2600] <- 2
+
+
+# 2.2 Miscellaneous feature [Xinyan: I want to drop this variable]
+count(all$MiscFeature)
+all$MiscFeature[is.na(all$MiscFeature)] <- 'None'
+all$MiscFeature <- as.factor(all$MiscFeature)
+table(all$MiscFeature)
+
+
+# 2.3 Alley
+count(all$Alley)
+all$Alley[is.na(all$Alley)] <- 'None'
+all$Alley <- as.factor(all$Alley)
+# plot the median SalePprice of different type of Alley in the train data.
+# [test data doesn't have SalePprice,so !is.na(all$SalePrice) filter all train data]
+all[!is.na(all$SalePrice),] %>% 
+  group_by(Alley) %>% 
+  dplyr::summarise(mean_price = mean(SalePrice),n=n())
+
+ggplot(all[!is.na(all$SalePrice),], aes(x=Alley, y=SalePrice)) +
+  geom_bar(stat='summary', fun.y = "median")
+
+table(all$Alley)
+
+# 2.4 Fence
+count(all$Fence)
+all$Fence[is.na(all$Fence)] <- 'None'
+all$Fence <- as.factor(all$Fence)
+
+all[!is.na(all$SalePrice),] %>% 
+  group_by(Fence) %>% 
+  dplyr::summarise(mean_price = mean(SalePrice),n=n())
+
+ggplot(all[!is.na(all$SalePrice),],aes(x=Fence,y=SalePrice)) + 
+  geom_bar(stat='summary', fun.y = "median") 
+
+table(all$Fence)
+
+# 2.5 Fireplace
+
+  # Fireplace quality
+count(all$FireplaceQu)
+all$FireplaceQu[is.na(all$FireplaceQu)] <- 'None'
+Qualities
+all$FireplaceQu<-as.integer(revalue(all$FireplaceQu, Qualities))
+table(all$FireplaceQu)
+
+ # Fireplace number
+table(all$Fireplaces)
+sum(table(all$Fireplaces))
+
+
+# 2.6 Parking lot
+
+count(all$LotFrontage)
+sum(is.na(all$LotFrontage)) ## 486 missing 
+  # Replace NA with median per neigborhood.
+count(all$Neighborhood)
+ggplot(all[!is.na(all$LotFrontage),], aes(x=as.factor(Neighborhood), y=LotFrontage)) +
+  geom_bar(stat='summary', fun.y = "median") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+for (i in 1:nrow(all)){
+  if(is.na(all$LotFrontage[i])){
+    all$LotFrontage[i] <- as.integer(median(all$LotFrontage
+                            [all$Neighborhood==all$Neighborhood[i]], na.rm=TRUE)) 
+  }
+}
+
+  # lot shape
+count(all$LotShape)
+all$LotShape<-as.integer(revalue(all$LotShape, c('IR3'=0, 'IR2'=1, 'IR1'=2, 'Reg'=3)))
+table(all$LotShape)
+
+  # LotConfig: Lot configuration
+count(all$LotConfig)
+all$LotConfig <- as.factor(all$LotConfig)
+
+# 2.7 garage
+count(all$GarageYrBlt)
+# use the year built of the house to replace year built of garage
+all$GarageYrBlt[is.na(all$GarageYrBlt)] <- all$YearBuilt[is.na(all$GarageYrBlt)]
+length(which(is.na(all$GarageType) & is.na(all$GarageFinish) & is.na(all$GarageCond) & is.na(all$GarageQual)))
+
+all %>%
+  filter(!is.na(GarageType) & is.na(all$GarageFinish) )  %>%
+  select(GarageCars,GarageArea,GarageType,GarageCond,GarageQual,GarageFinish) 
+
+all$GarageCond[all$Id==2127] <- names(sort(-table(all$GarageCond)))[1]
+
+all$GarageQual[all$Id==2127] <- names(sort(-table(all$GarageQual)))[1]
+
+all$GarageFinish[all$Id==2127] <- names(sort(-table(all$GarageFinish)))[1]
+
+all$GarageCars[all$Id==2577] <- 0
+all$GarageArea[all$Id==2577] <- 0
+all$GarageType[all$Id==2577] <- NA
+length(which(is.na(all$GarageType) & is.na(all$GarageFinish) & is.na(all$GarageCond) & is.na(all$GarageQual)))
+
+  # garage type
+count(all$GarageType)
+all$GarageType[is.na(all$GarageType)] <- 'No Garage'
+all$GarageType <- as.factor(all$GarageType)
+table(all$GarageType)
+
+# GarageFinis
+count(all$GarageFinish)
+all$GarageFinish[is.na(all$GarageFinish)] <- 'None'
+Finish <- c('None'=0, 'Unf'=1, 'RFn'=2, 'Fin'=3)
+all$GarageFinish<-as.integer(revalue(all$GarageFinish, Finish))
+table(all$GarageFinish)
+
+# GarageQual: Garage quality
+count(all$GarageQual)
+all$GarageQual[is.na(all$GarageQual)] <- 'None'
+all$GarageQual<-as.integer(revalue(all$GarageQual, Qualities))
+table(all$GarageQual)
+
+#  GarageCond: Garage condition
+count(all$GarageCond)
+all$GarageCond[is.na(all$GarageCond)] <- 'None'
+all$GarageCond<-as.integer(revalue(all$GarageCond, Qualities))
+table(all$GarageCond)
+
+## 2.8 Basement 
+
+length(which(is.na(all$BsmtQual) & is.na(all$BsmtCond) 
+      & is.na(all$BsmtExposure) & is.na(all$BsmtFinType1) & is.na(all$BsmtFinType2)))
+all[!is.na(all$BsmtFinType1) & 
+      (is.na(all$BsmtCond)|is.na(all$BsmtQual)|is.na(all$BsmtExposure)
+       |is.na(all$BsmtFinType2)), 
+    c('BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1', 'BsmtFinType2')]
+
+# If basement has BsmtFinType1, then use the most frequent value to replace the missing value
+all$BsmtFinType2[333] <- names(sort(-table(all$BsmtFinType2)))[1]
+all$BsmtExposure[c(949, 1488, 2349)] <- names(sort(-table(all$BsmtExposure)))[1]
+all$BsmtCond[c(2041, 2186, 2525)] <- names(sort(-table(all$BsmtCond)))[1]
+all$BsmtQual[c(2218, 2219)] <- names(sort(-table(all$BsmtQual)))[1]
+
+all$BsmtQual[is.na(all$BsmtQual)] <- 'None'
+all$BsmtQual<-as.integer(revalue(all$BsmtQual, Qualities))
+table(all$BsmtQual)
+
+all$BsmtCond[is.na(all$BsmtCond)] <- 'None'
+all$BsmtCond<-as.integer(revalue(all$BsmtCond, Qualities))
+table(all$BsmtCond)
+
+all$BsmtExposure[is.na(all$BsmtExposure)] <- 'None'
+Exposure <- c('None'=0, 'No'=1, 'Mn'=2, 'Av'=3, 'Gd'=4)
+all$BsmtExposure<-as.integer(revalue(all$BsmtExposure, Exposure))
+table(all$BsmtExposure)
+
+all$BsmtFinType1[is.na(all$BsmtFinType1)] <- 'None'
+FinType <- c('None'=0, 'Unf'=1, 'LwQ'=2, 'Rec'=3, 'BLQ'=4, 'ALQ'=5, 'GLQ'=6)
+all$BsmtFinType1<-as.integer(revalue(all$BsmtFinType1, FinType))
+table(all$BsmtFinType1)
+
+all$BsmtFinType2[is.na(all$BsmtFinType2)] <- 'None'
+FinType <- c('None'=0, 'Unf'=1, 'LwQ'=2, 'Rec'=3, 'BLQ'=4, 'ALQ'=5, 'GLQ'=6)
+all$BsmtFinType2<-as.integer(revalue(all$BsmtFinType2, FinType))
+table(all$BsmtFinType2)
+
+all[(is.na(all$BsmtFullBath)|is.na(all$BsmtHalfBath)|is.na(all$BsmtFinSF1)|is.na(all$BsmtFinSF2)|is.na(all$BsmtUnfSF)|is.na(all$TotalBsmtSF)), c('BsmtQual', 'BsmtFullBath', 'BsmtHalfBath', 'BsmtFinSF1', 'BsmtFinSF2', 'BsmtUnfSF', 'TotalBsmtSF')]
+all$BsmtFullBath[is.na(all$BsmtFullBath)] <-0
+table(all$BsmtFullBath)
+all$BsmtHalfBath[is.na(all$BsmtHalfBath)] <-0
+table(all$BsmtHalfBath)
+all$BsmtFinSF1[is.na(all$BsmtFinSF1)] <-0
+all$BsmtFinSF2[is.na(all$BsmtFinSF2)] <-0
+all$BsmtUnfSF[is.na(all$BsmtUnfSF)] <-0
+all$TotalBsmtSF[is.na(all$TotalBsmtSF)] <-0
+
+## 2.9 Masonry variables 
+count(all$MasVnrType)
+count(all$MasVnrArea)
+length(which(is.na(all$MasVnrType) & is.na(all$MasVnrArea)))
+
+all[is.na(all$MasVnrType) & !is.na(all$MasVnrArea), c('MasVnrType', 'MasVnrArea')]
+
+all$MasVnrType[2611] <- names(sort(-table(all$MasVnrType)))[2] #taking the 2nd value as the 1st is 'none'
+all[2611, c('MasVnrType', 'MasVnrArea')]
+
+all$MasVnrType[is.na(all$MasVnrType)] <- 'None'
+all[!is.na(all$SalePrice),] %>% group_by(MasVnrType) %>% dplyr::summarise(median = median(SalePrice), counts=n()) %>% arrange(median)
+
+Masonry <- c('None'=0, 'BrkCmn'=0, 'BrkFace'=1, 'Stone'=2)
+all$MasVnrType<-as.integer(revalue(all$MasVnrType, Masonry))
+table(all$MasVnrType)
+
+all$MasVnrArea[is.na(all$MasVnrArea)] <-0
+
+#2.10 MS Zoning
+
+all$MSZoning[is.na(all$MSZoning)] <- names(sort(-table(all$MSZoning)))[1]
+all$MSZoning <- as.factor(all$MSZoning)
+table(all$MSZoning)
+
+# 2.11 kitchen variables
+all$KitchenQual[is.na(all$KitchenQual)] <- 'TA' #replace with most common value
+all$KitchenQual<-as.integer(revalue(all$KitchenQual, Qualities))
+table(all$KitchenQual)
+
+# 2.12 utility : get rid of this varaible
+
+all$Utilities <- NULL
+
+# 2.13 Functional: Home functionality
+
+all$Functional[is.na(all$Functional)] <- names(sort(-table(all$Functional)))[1]
+all$Functional <- as.integer(revalue(all$Functional, c('Sal'=0, 'Sev'=1, 'Maj2'=2, 'Maj1'=3, 'Mod'=4, 'Min2'=5, 'Min1'=6, 'Typ'=7)))
+table(all$Functional)
+
+# 2.14 exterior variables
+  # Exterior1st: Exterior covering on house
+all$Exterior1st[is.na(all$Exterior1st)] <- names(sort(-table(all$Exterior1st)))[1]
+all$Exterior1st <- as.factor(all$Exterior1st)
+table(all$Exterior1st)
+
+  # Exterior2nd: Exterior covering on house (if more than one material)
+table(all$Exterior2nd)
+all$Exterior2nd[is.na(all$Exterior2nd)] <- names(sort(-table(all$Exterior2nd)))[1]
+all$Exterior2nd <- as.factor(all$Exterior2nd)
+table(all$Exterior2nd)
+
+  # ExterQual: Evaluates the quality of the material on the exterior
+table(all$ExterQual) # Ordinal
+all$ExterQual <- as.integer(revalue(all$ExterQual,Qualities))
+table(all$ExterQual)
+
+  # ExterCond: Evaluates the present condition of the material on the exterior
+table(all$ExterCond)# Ordinal
+all$ExterCond <- as.integer(revalue(all$ExterCond,Qualities))
+table(all$ExterCond)
+
+
+# 2.15 Electrical: Electrical system
+all$Electrical[is.na(all$Electrical)] <- names(sort(-table(all$Electrical)))[1]
+all$Electrical <- as.factor(all$Electrical)
+table(all$Electrical)
+
+# 2.16 SaleType: Type of sale
+all$SaleType[is.na(all$SaleType)] <- names(sort(-table(all$SaleType)))[1]
+all$SaleType <- as.factor(all$SaleType)
+table(all$SaleType)
+
+all$SaleCondition <- as.factor(all$SaleCondition)
+table(all$SaleCondition)
+
+####### 3. Label encoding/factorizing the remaining character variables ####### 
+
+Charcol <- names(all[,sapply(all, is.character)]) 
+Charcol
+cat('There are', length(Charcol), 'remaining columns with character values')
+
+
+# 3.1 foundation
+table(all$Foundation)
+#No ordinality, so converting into factors
+all$Foundation <- as.factor(all$Foundation)
+table(all$Foundation)
+
+# 3.2 heat
+  #Heating: Type of heating
+table(all$Heating)
+#No ordinality, so converting into factors
+all$Heating <- as.factor(all$Heating)
+table(all$Heating)
+
+  # HeatingQC: Heating quality and condition
+table(all$HeatingQC)
+#making the variable ordinal using the Qualities vector
+all$HeatingQC<-as.integer(revalue(all$HeatingQC, Qualities))
+table(all$HeatingQC)
+  #CentralAir: Central air conditioning
+table(all$CentralAir)
+all$CentralAir<-as.integer(revalue(all$CentralAir, c('N'=0, 'Y'=1)))
+table(all$CentralAir)
+
+# 3.3 Roof
+  # RoofStyle: Type of roof
+table(all$RoofStyle) # not ordinal
+all$RoofStyle <- as.factor(all$RoofStyle)
+table(all$RoofStyle)
+  # RoofMatl: Roof material
+table(all$RoofMatl) # not ordinal
+all$RoofMatl <- as.factor(all$RoofMatl)
+table(all$RoofMatl)
+
+# 3.4 Land
+  #LandContour: Flatness of the property
+table(all$LandContour) # not ordinal
+all$LandContour <- as.factor(all$LandContour)
+table(all$LandContour)
+
+  #LandSlope: Slope of property
+table(all$LandSlope) # Ordinal
+all$LandSlope<-as.integer(revalue(all$LandSlope, c('Sev'=0, 'Mod'=1, 'Gtl'=2)))
+table(all$LandSlope)
+
+# 3.5 dwelling 
+
+  #BldgType: Type of dwelling
+table(all$BldgType)
+all %>%
+  filter(!is.na(SalePrice)) %>%
+  group_by(BldgType) %>%
+  dplyr::summarise(median_price = median(SalePrice),n=n()) 
+
+ggplot(all[!is.na(all$SalePrice),], aes(x=as.factor(BldgType), y=SalePrice)) +
+  geom_bar(stat='summary', fun.y = "median")+
+  scale_y_continuous(breaks= seq(0, 800000, by=100000), labels = scales::comma) +
+  geom_label(stat = "count", aes(label = ..count.., y = ..count..))
+
+table(all$BldgType)  #No ordinality
+all$BldgType <- as.factor(all$BldgType)
+table(all$BldgType)
+
+  # HouseStyle: Style of dwelling
+table(all$HouseStyle) #No ordinality
+all$HouseStyle <- as.factor(all$HouseStyle)
+table(all$HouseStyle)
+
+# 3.6 Neighborhood and condition
+  #Neighborhood: Physical locations within Ames city limits
+table(all$Neighborhood)#No ordinality
+all$Neighborhood <- as.factor(all$Neighborhood)
+table(all$Neighborhood)
+  #Condition1: Proximity to various conditions
+table(all$Condition1)#No ordinality
+all$Condition1 <- as.factor(all$Condition1)
+table(all$Condition1)
+#Condition2: Proximity to various conditions
+table(all$Condition2)#No ordinality
+all$Condition2 <- as.factor(all$Condition2)
+sum(table(all$Condition2))
+
+# 3.7 Pavement of street and driveway
+  #Street: Type of road access to property
+table(all$Street)#Ordinal
+all$Street<-as.integer(revalue(all$Street, c('Grvl'=0, 'Pave'=1)))
+table(all$Street)
+
+  # PavedDrive: Paved driveway
+table(all$PavedDrive) # Ordinal
+all$PavedDrive <- as.integer(revalue(all$PavedDrive, c('N'=0, 'P'=1, 'Y'=2)))
+#all$PavedDrive<-as.integer(revalue(all$PavedDrive, c('N'=0, 'P'=1, 'Y'=2)))
+table(all$PavedDrive)
+
+
+#######  4.  Changing some numeric variables into factors ####### 
+str(all$YrSold)
+all$YrSold <- as.factor(all$YrSold)
+all$MoSold <- as.factor(all$MoSold)
+
+all[!is.na(all$SalePrice),] %>%
+  group_by(YrSold) %>%
+  dplyr::summarise(mean_price = mean(SalePrice),median_price=median(SalePrice),n=n())
+
+
+ys<- ggplot(data=all[!is.na(all$SalePrice),],aes(x=YrSold,y=SalePrice))+
+  geom_bar(stat = 'summary',fun.y='median') +
+  geom_label(stat = "count", aes(label = ..count.., y = ..count..)) +
+  geom_hline(yintercept=163000, linetype="dashed", color = "red") +
+  coord_cartesian(ylim = c(0, 200000))+
+  scale_y_continuous(breaks = seq(0, 800000, by=25000)) 
+
+ms<- ggplot(data=all[!is.na(all$SalePrice),],aes(x=MoSold,y=SalePrice))+
+  geom_bar(stat = 'summary',fun.y='median') +
+  geom_label(stat = "count", aes(label = ..count.., y = ..count..)) +
+  geom_hline(yintercept=163000, linetype="dashed", color = "red") +
+  coord_cartesian(ylim = c(0, 200000)) + 
+  scale_y_continuous(breaks = seq(0, 800000, by=25000))
+
+grid.arrange(ys, ms, widths=c(1,1.5))
+
+# MSSubClass
+table(all$MSSubClass)
+str(all$MSSubClass)
+all$MSSubClass <- as.factor(all$MSSubClass)
+#revalue for better readability
+all$MSSubClass<-revalue(all$MSSubClass, c('20'='1 story 1946+', '30'='1 story 1945-', '40'='1 story unf attic', '45'='1,5 story unf', '50'='1,5 story fin', '60'='2 story 1946+', '70'='2 story 1945-', '75'='2,5 story all ages', '80'='split/multi level', '85'='split foyer', '90'='duplex all style/age', '120'='1 story PUD 1946+', '150'='1,5 story PUD all', '160'='2 story PUD 1946+', '180'='PUD multilevel', '190'='2 family conversion'))
+all$MSSubClass <- as.factor(all$MSSubClass)
+str(all$MSSubClass)
+table(all$MSSubClass)
+
+#######  5. All variables are clean? I suppose! ####### 
+glimpse(all)
+
+write.csv(all,'all2.csv',row.names = F)
+
+all2 <- read.csv('all2.csv')
+
+
+
+```
+
+```{r}
+all_data <- read_csv('all2.csv')
+all <- all_data
+
+test <- all_data[is.na(all_data$SalePrice),]
+train <- all_data[!is.na(all_data$SalePrice),]
+
+```
+
+
+
+
+
+## correlation plot 1
+
+```{r}
+
+numericVars <- which(sapply(all, is.numeric))
+all_numVar <- all[, numericVars]
+cor_numVar <- cor(all_numVar, use="pairwise.complete.obs")
+
+
+#sort on decreasing correlations with SalePrice
+cor_sorted <- as.matrix(sort(cor_numVar[,'SalePrice'], decreasing = TRUE))
+#select only high corelations
+CorHigh <- names(which(apply(cor_sorted, 1, function(x) abs(x)>0.5 )))
+cor_numVar <- cor_numVar[CorHigh, CorHigh]
+
+##Combining correlogram with the significance test
+
+cor_5 <- rcorr(as.matrix(cor_numVar))
+M <- cor_5$r
+p_mat <- cor_5$P
+
+col3 <- colorRampPalette(c("red", "white", "dark blue")) 
+corrplot(abs(M),method = "color",type = 'upper',order = "AOE", col = col3(200), cl.lim = c(0, 1),addCoef.col = 'black',tl.cex = .7,cl.cex = .7, number.cex=.7)
+
+
+```
+
+## Select important Variable
+
+```{r}
+##random forest
+set.seed(2018)
+quick_RF <- randomForest(x=all[ , !names(all) %in% c("SalePrice")][1:1460,-79], y=all$SalePrice[1:1460], ntree=1000,importance=TRUE)
+imp_RF <- importance(quick_RF)
+imp_DF <- data.frame(Variables = row.names(imp_RF), MSE = imp_RF[,1])
+imp_DF <- imp_DF[order(imp_DF$MSE, decreasing = TRUE),]
+
+ggplot(imp_DF[1:20,], aes(x=reorder(Variables, MSE), y=MSE, fill=MSE)) +
+  geom_bar(stat = 'identity') + 
+  labs(x = 'Variables', y= '% increase MSE if variable is randomly permuted') + 
+  coord_flip() + 
+  theme(legend.position="none")+
+  scale_fill_gradient2(low="pink",high="dark blue")
+
+```
+
+```{r}
+##XGBoost
+numericVars <- which(sapply(all, is.numeric)) #index vector numeric variables
+numericVarNames <- names(numericVars) #saving names vector for use later on
+
+#dropVars <- c('YearRemodAdd', 'GarageYrBlt', 'GarageArea', 'GarageCond', 'TotalBsmtSF', 'TotalRmsAbvGrd', 'BsmtFinSF1')
+#all <- all[,!(names(all) %in% dropVars)]
+##Removing outliers
+#all <- all[-c(524, 1299),]
+
+#numericVarNames <- numericVarNames[!(numericVarNames %in% c('MSSubClass', 'MoSold', 'YrSold', 'SalePrice', 'OverallQual', 'OverallCond'))] #numericVarNames was created before having done anything
+
+
+#numericVars <- which(sapply(all, is.numeric)) #index vector numeric variables
+#numericVarNames <- names(numericVars) #saving names vector for use later on
+DFnumeric <- all[, names(all) %in% numericVarNames]
+DFfactors <- all[, !(names(all) %in% numericVarNames)]
+DFfactors <- DFfactors[, names(DFfactors) != 'SalePrice']
+PreNum <- preProcess(DFnumeric, method=c("center", "scale"))
+DFnorm <- predict(PreNum, DFnumeric)
+DFdummies <- as.data.frame(model.matrix(~.-1, DFfactors))
+combined <- cbind(DFnorm, DFdummies)
+train1 <- combined[!is.na(all$SalePrice),]
+test1 <- combined[is.na(all$SalePrice),]
+
+xgb_grid = expand.grid(
+  nrounds = 1000,
+  eta = c(0.1, 0.05, 0.01),
+  max_depth = c(2, 3, 4, 5, 6),
+  gamma = 0,
+  colsample_bytree=1,
+  min_child_weight=c(1, 2, 3, 4 ,5),
+  subsample=1
+)
+
+my_control <-trainControl(method="cv", number=5)
+
+#xgb_caret <- train(x=train1, y=all$SalePrice[!is.na(all$SalePrice)], method='xgbTree', trControl= my_control, tuneGrid=xgb_grid) 
+#xgb_caret$bestTune
+
+
+label_train <- all$SalePrice[!is.na(all$SalePrice)]
+# put our testing & training data into two seperates Dmatrixs objects
+dtrain <- xgb.DMatrix(data = as.matrix(train1), label= label_train)
+dtest <- xgb.DMatrix(data = as.matrix(test1))
+
+default_param<-list(
+  objective = "reg:linear",
+  booster = "gbtree",
+  eta=0.05, #default = 0.3
+  gamma=0,
+  max_depth=6, #default=6
+  min_child_weight=3, #default=1
+  subsample=1,
+  colsample_bytree=1
+)
+
+xgbcv <- xgb.cv( params = default_param, data = dtrain, nrounds = 500, nfold = 5, showsd = T, stratified = T, print_every_n = 40, early_stopping_rounds = 10, maximize = F)
+
+xgb_mod <- xgb.train(data = dtrain, params=default_param, nrounds = 145)
+XGBpred <- predict(xgb_mod, dtest)
+predictions_XGB <- exp(XGBpred) #need to reverse the log to the real values
+head(predictions_XGB)
+
+#install.packages("Ckmeans.1d.dp")
+library(Ckmeans.1d.dp) #required for ggplot clustering
+mat <- xgb.importance (feature_names = colnames(train1),model = xgb_mod)
+xgb.ggplot.importance(importance_matrix = mat[2:20], rel_to_first = TRUE)
+
+```
+
+
+## relationship between salesprice and other variables
+
+```{r}
+
+#salesprice across years
+year <- as.factor(all$YearBuilt)
+p_yearbuilt <- ggplot(data = all, aes(x=year, y=all$SalePrice, fill = year)) +
+  geom_boxplot() +
+  guides(fill=FALSE) +
+  theme(axis.text.x  = element_text(size=8,angle=45)) +
+  scale_x_discrete(breaks = seq(1872,2010,5)) +
+  ylab('SalesPrice') + xlab('YearBuilt') +
+  scale_y_continuous(breaks= seq(0, 800000, by=100000), labels = scales::comma)
+  
+#salesprice vs overall quality
+p_overallqual <- ggplot(data = all, aes(x=factor(all$OverallQual), y=all$SalePrice, fill = all$OverallQual)) +
+  geom_boxplot() +
+  guides(fill=FALSE) +
+  scale_fill_gradient(low="blue", high="orange") +
+  theme(axis.text.x  = element_text(size=10)) +
+  ylab('SalesPrice') + xlab('Overall Quality') +
+  scale_x_discrete(breaks = seq(0, 10, 1)) +
+  scale_y_continuous(breaks = seq(0, 800000, by=100000), labels = scales::comma)
+  
+#salesprice vs ground living area
+p_grlivarea <- ggplot(data = all, aes(x=factor(all$GrLivArea), y=all$SalePrice)) +
+  geom_point(col='blue') +
+  geom_smooth(method = "lm", se=FALSE, color="black", aes(group=1)) +
+  guides(fill=FALSE) +
+  theme(axis.text.x  = element_text(size=8)) +
+  ylab('SalesPrice') + xlab('Ground Living Area') +
+  scale_x_discrete(breaks = seq(0, 50000, 100)) +
+  scale_y_continuous(breaks = seq(0, 800000, by=100000), labels = scales::comma)
+
+#salesprice vs bedroom number
+p_bedroomabvgr <- ggplot(data = all, aes(x=factor(all$BedroomAbvGr), y=all$SalePrice, fill = all$BedroomAbvGr)) +
+  geom_boxplot() +
+  guides(fill=FALSE) +
+  scale_fill_gradient(low="orange", high="blue") +
+  theme(axis.text.x  = element_text(size=10)) +
+  ylab('SalesPrice') + xlab('Bedrooms above grade') +
+  scale_x_discrete(breaks = seq(0, 8, 1)) +
+  scale_y_continuous(breaks = seq(0, 800000, by=100000), labels = scales::comma)
+
+```
+
+
+## Sale Price with neighborhood
+
+```{r}
+#Classifications 
+train <- all_data[!is.na(all_data$SalePrice),]
+#Neighborhood (Upper, middle, lower)
+#train$NeighRich[train$Neighborhood %in% c('StoneBr', 'NridgHt', 'NoRidge')] <- 'Rich'
+#train$NeighRich[!train$Neighborhood %in% c('MeadowV', 'IDOTRR', 'BrDale', 'StoneBr', 'NridgHt', 'NoRidge')] <- "Medium"
+#train$NeighRich[train$Neighborhood %in% c('MeadowV', 'IDOTRR', 'BrDale')] <- "Poor"
+
+train$NeighRich[train$Neighborhood %in% c('StoneBr', 'NridgHt', 'NoRidge', 'Gilbert', 'Somerst', 'Timber', 'Veenker' ,'ClearCr')] <- 'Upper'
+train$NeighRich[!train$Neighborhood %in% c('StoneBr', 'NridgHt', 'NoRidge', 'Gilbert', 'Somerst', 'Timber', 'Veenker' ,'ClearCr', 'MeadowV', 'IDOTRR', 'BrDale', 'BrkSide', 'Edwards', 'Blueste', 'MeadowV', 'Sawyer', 'OldTown')] <- 'Middle'
+train$NeighRich[train$Neighborhood %in% c('MeadowV', 'IDOTRR', 'BrDale', 'BrkSide', 'Edwards', 'Blueste', 'MeadowV', 'Sawyer', 'OldTown')] <- 'Lower'
+train$NeighRich<-factor(train$NeighRich,order=TRUE,levels=c("Upper","Middle","Lower"))   
+
+
+
+#Livingspace (High, Medium, Low)
+train$LivingC[train$GrLivArea >= 1770] <- 'High'
+train$LivingC[1770 > train$GrLivArea & train$GrLivArea > 1130] <- 'Medium'
+train$LivingC[train$GrLivArea <= 1130] <- 'Low'
+train$LivingC<-factor(train$LivingC,order=TRUE,levels=c("High","Medium","Low"))   
+
+#OverallQuality (3 = Good and above, 2 = average to above average, 1 = Below average and lower)
+train$QualLevel[train$OverallQual >= 7] <- 'High'
+train$QualLevel[7 > train$OverallQual & train$OverallQual > 4] <- 'Medium'
+train$QualLevel[train$OverallQual <= 4] <- 'Low'
+train$QualLevel<-factor(train$QualLevel,order=TRUE,levels=c("High","Medium","Low"))   
+
+#Saleprice
+train$Salelvl[train$SalePrice >= 214000] <- 'High'
+train$Salelvl[214000 > train$SalePrice & train$SalePrice > 140000] <- 'Medium'
+train$Salelvl[train$SalePrice <= 140000] <- 'Low'
+train$Salelvl<-factor(train$Salelvl,order=TRUE,levels=c("High","Medium","Low"))   
+
+```
+
+```{r}
+library(ggalluvial)
+frequency_train <- train %>%
+  select(Salelvl,QualLevel,LivingC,NeighRich) %>%
+  group_by(Salelvl,QualLevel,LivingC,NeighRich) %>%
+  dplyr::summarise(frequency=n())
+
+
+ggplot(data = frequency_train,
+       aes(axis1 = Salelvl,axis2 = QualLevel, axis3 = LivingC, axis4 = NeighRich,
+           weight = frequency)) +
+  scale_x_discrete(limits = c('Salelvl',"QualLevel", "LivingC", "NeighRich"), expand = c(.1, .01)) +
+  geom_alluvium(aes(fill = Salelvl)) +
+  #scale_fill_brewer(palette = "Dark2")+
+  geom_stratum() + geom_text(stat = "stratum", label.strata = TRUE) +
+  theme_minimal() +
+  ggtitle("passengers on the maiden voyage of the Titanic",
+          "stratified by demographics and survival")
+```
+
+
+
+## Variable Transformation(Log)
+
+```{r}
+# Multiple plot function
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  numPlots = length(plots)
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+```
+
+## Sale price log transformation
+
+```{r}
+
+# Sale price distribution
+original_sp<- ggplot(all[!is.na(all$SalePrice),], aes(x=SalePrice)) +
+  scale_x_continuous(breaks=seq(0,800000,100000),labels = scales::comma) +
+  scale_y_continuous(labels = scales::percent) +
+  geom_histogram(aes(y=..density..), color='white', 
+                 fill='lightblue', alpha=.6, bins = 60) +
+  geom_line(aes(y=..density..), color='lightpink', lwd = 0.8, stat = 'density') +
+  theme_minimal() + 
+  labs(title="Sale Price Distribution")
+```
+
+```{r}
+#require(WVPlots)
+require(e1071) # skewness
+
+original_sp_plot<-qplot(train$SalePrice, geom='density') +# +(train, aes(x=SalePrice)) +
+  geom_histogram(aes(y=..density..), color='white', 
+                 fill='lightblue', alpha=.5, bins = 60) +
+  geom_line(aes(y=..density..), color='cornflowerblue', lwd = 0.6, stat = 'density') + 
+  stat_function(fun = dnorm, colour = 'indianred', lwd = 0.6, args = 
+                  list(mean(train$SalePrice), sd(train$SalePrice))) +
+  scale_x_continuous(limits=c(0,600000),breaks = seq(0,600000,100000), labels = dollar) +
+  scale_y_continuous(labels = percent) +
+  theme_minimal()+
+  labs(title="Sale Price Distribution and normal distribution",
+       x='Sale Price') + 
+  annotate('text', color='indianred',x = 500000, y = 0.0000045, label = paste('skewness =', round(skew(train$SalePrice),2)))
+qqnorm(train$SalePrice)
+qqline(train$SalePrice)
+```
+
+```{r}
+train$SalePrice_log <- log(train$SalePrice) #default is the natural logarithm, "+1" is not necessary as there are no 0's
+#skew(train$SalePrice_log)
+
+log_sp_plot<-qplot(train$SalePrice_log, geom='density') +
+  geom_histogram(aes(y=..density..), color='white', 
+                 fill='lightblue', alpha=.5, bins = 60) +
+  geom_line(aes(y=..density..), color='cornflowerblue', lwd = 0.6, stat = 'density') + 
+  stat_function(fun = dnorm, colour = 'indianred', lwd = 0.6, args = 
+                 list(mean(train$SalePrice_log), sd(train$SalePrice_log))) +
+  scale_y_continuous(labels = waiver()) +
+  theme_minimal()+
+  labs(title="Sale Price Distribution and normal distribution",
+       x='log(Sale Price)') +
+  annotate('text', color='indianred',x = 13, y = 0.6, label = paste('skewness =', round(skew(train$SalePrice_log),3)))
+multiplot(original_sp_plot,log_sp_plot,cols = 2)
+```
+
+```{r}
+## plot
+par(mfrow=c(1,2))
+qqnorm(train$SalePrice)
+qqline(train$SalePrice)
+qqnorm(train$SalePrice_log)
+qqline(train$SalePrice_log)
+
+```
+
+## GrLivArea log transformation
+
+```{r}
+
+require(e1071) # skewness
+
+original_GrLivArea_plot<-qplot(train$GrLivArea, geom='density') +# +(train, aes(x=SalePrice)) +
+  geom_histogram(aes(y=..density..), color='white', 
+                 fill='lightblue', alpha=.5, bins = 60) +
+  geom_line(aes(y=..density..), color='cornflowerblue', lwd = 0.6, stat = 'density') + 
+  stat_function(fun = dnorm, colour = 'indianred', lwd = 0.6, args = 
+                  list(mean(train$GrLivArea), sd(train$GrLivArea))) +
+  scale_x_continuous(limits=c(0,4000),breaks = seq(0,4000,1000), labels = dollar) +
+  scale_y_continuous(labels = percent) +
+  theme_minimal()+
+  labs(title="GrLivArea Distribution and normal distribution",
+       x='GrLivArea') + 
+  annotate('text', color='indianred',x = 3000, y = 0.0005, label = paste('skewness =', round(skew(train$GrLivArea),2)))
+
+
+train$GrLivArea_log <- log(train$GrLivArea) #default is the natural logarithm, "+1" is not necessary as there are no 0's
+#skew(train$SalePrice_log
+
+
+## the qq plot
+par(mfrow=c(1,2))
+qqnorm(train$GrLivArea)
+qqline(train$GrLivArea)
+qqnorm(train$GrLivArea_log) 
+qqline(train$GrLivArea_log)
+
+
+
+## log transformation plot
+log_GrLivArea_plot<-qplot(train$GrLivArea_log, geom='density') +
+  geom_histogram(aes(y=..density..), color='white', 
+                 fill='lightblue', alpha=.5, bins = 60) +
+  geom_line(aes(y=..density..), color='cornflowerblue', lwd = 0.6, stat = 'density') + 
+  stat_function(fun = dnorm, colour = 'indianred', lwd = 0.6, args = 
+                 list(mean(train$GrLivArea_log), sd(train$GrLivArea_log))) +
+  scale_y_continuous(labels = waiver()) +
+  theme_minimal()+
+  labs(title="GrLivArea Distribution and normal distribution",
+       x='log(GrLivArea)') +
+  annotate('text', color='indianred',x = 8.1, y = 0.8, label = paste('skewness =', round(skew(train$GrLivArea_log),3)))
+multiplot(original_GrLivArea_plot,log_GrLivArea_plot,cols = 2)
+
+
+```
+
+TotalBsmtSF log transformation
+
+```{r}
+
+require(e1071) # skewness
+
+original_TotalBsmtSF_plot<-qplot(train$TotalBsmtSF, geom='density') +# +(train, aes(x=SalePrice)) +
+  geom_histogram(aes(y=..density..), color='white', 
+                 fill='lightblue', alpha=.5, bins = 60) +
+  geom_line(aes(y=..density..), color='cornflowerblue', lwd = 0.6, stat = 'density') + 
+  stat_function(fun = dnorm, colour = 'indianred', lwd = 0.6, args = 
+                  list(mean(train$TotalBsmtSF), sd(train$TotalBsmtSF))) +
+  scale_x_continuous(limits=c(0,4000),breaks = seq(0,4000,1000), labels = dollar) +
+  scale_y_continuous(labels = percent) +
+  theme_minimal()+
+  labs(title="TotalBsmtSF Distribution and normal distribution",
+       x='TotalBsmtSF') + 
+  annotate('text', color='indianred',x = 3000, y = 0.0007, label = paste('skewness =', round(skew(train$TotalBsmtSF),2)))
+
+#log transformation for those basement not equal 0
+TotalBsmtSF_log <- log(train$TotalBsmtSF[which(train$TotalBsmtSF != 0)]) 
+
+#TotalBsmtSF_log <- c()
+#for (i in 1:length(train$TotalBsmtSF)){
+#  if (train$TotalBsmtSF[i] != 0){
+#    TotalBsmtSF_log[i] <- log(train$TotalBsmtSF[i])
+#  } else {
+#    TotalBsmtSF_log[i] <- 0
+#  }
+#}
+
+## the qq plot
+
+par(mfrow=c(1,2))
+qqnorm(train$TotalBsmtSF)
+qqline(train$TotalBsmtSF)
+qqnorm(TotalBsmtSF_log) 
+qqline(TotalBsmtSF_log)
+
+
+## log transformation plot
+log_TotalBsmtSF_plot<-qplot(TotalBsmtSF_log, geom='density') +
+  geom_histogram(aes(y=..density..), color='white', 
+                 fill='lightblue', alpha=.5, bins = 60) +
+  geom_line(aes(y=..density..), color='cornflowerblue', lwd = 0.6, stat = 'density') + 
+  stat_function(fun = dnorm, colour = 'indianred', lwd = 0.6, args = 
+                 list(mean(TotalBsmtSF_log), sd(TotalBsmtSF_log))) +
+  scale_y_continuous(labels = waiver()) +
+  theme_minimal()+
+  labs(title="TotalBsmtSF Distribution and normal distribution",
+       x='log(TotalBsmtSF)') +
+  annotate('text', color='indianred',x = 5.8, y = 0.6, label = paste('skewness =', round(skew(TotalBsmtSF_log),3)))
+multiplot(original_TotalBsmtSF_plot,log_TotalBsmtSF_plot,cols = 2)
+```
